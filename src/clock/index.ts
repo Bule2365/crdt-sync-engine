@@ -1,0 +1,1 @@
+export { VectorClock, ClockComparison } from './vector-clock';
