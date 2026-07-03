@@ -109,7 +109,7 @@ export class LWWRegister {
         const payload = operation.payload as LWWRegisterPayload;
         const incoming: LWWRegisterState = {
             value: payload.value,
-            timestamp: operation.timestamp,
+            timestamp: operation.vectorClock[operation.nodeId] ?? 0,
             nodeId: operation.nodeId,
         };
         if (this.wins(incoming, this.state)) {

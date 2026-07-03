@@ -39,6 +39,14 @@ export class OperationLog {
     private db: ClassicLevel<string, string> | null;
     private lastSeqNum: number;
 
+    async hasOperation(operationId: string): Promise<boolean> {
+        const entries = await this.getAll();
+
+        return entries.some(
+            (entry) => entry.operation.operationId === operationId,
+        );
+    }
+
     /**
      * @param dataDir Path direktori LevelDB untuk log ini.
      *                Setiap node harus memiliki dataDir unik.

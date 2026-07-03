@@ -90,21 +90,23 @@ export class SyncEngine {
         let appliedCount = 0;
 
         for (const operation of delta.operations) {
-            const localClock = this.engine.getVectorClock();
-            const rel = VectorClock.compare(operation.vectorClock, localClock);
-            if (
-                rel === ClockComparison.BEFORE ||
-                rel === ClockComparison.EQUAL
-            ) {
-                continue; // sudah pernah diterima, skip
+            const alreadyApplied =
+                await this.log.hasOperation(operation.operationId);
+
+            if (alreadyApplied) {
+                continue;
             }
 
-            this.engine.applyOperation(operation, true); // isRemote = true WAJIB
+            this.engine.applyOperation(operation, true);
             await this.log.append(operation);
             appliedCount++;
         }
 
-        this.updatePeerClock(delta.fromNodeId, delta.senderVectorClock);
+        this.updatePeerClock(
+            delta.fromNodeId,
+            delta.senderVectorClock,
+        );
+
         return appliedCount;
     }
 

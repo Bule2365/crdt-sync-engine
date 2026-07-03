@@ -1,4 +1,6 @@
+import { encode, decode } from '../compression';
 import { WebSocketServer, WebSocket } from 'ws';
+import type { RawData } from 'ws';
 import type { SyncEngine } from '../sync';
 import {
     SyncMessageType,
@@ -21,7 +23,7 @@ export interface PeerConnectionStatus {
  * SEBAGAI CLIENT (menghubungi peer di PEERS config) secara bersamaan.
  *
  * Transport TIDAK memproses logika sync. Ia hanya:
- * - Serialize/deserialize SyncMessage ke/dari JSON.
+ * - Serialize/deserialize SyncMessage ke/dari MsgPack + zlib compression.
  * - Routing pesan ke method Sync Engine yang sesuai.
  * - Mengelola lifecycle koneksi (connect, reconnect, close).
  */
@@ -32,6 +34,7 @@ export class TransportLayer {
     private readonly socketsByPeer: Map<NodeId, WebSocket> = new Map();
     private readonly reconnectAttempts: Map<string, number> = new Map();
     private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    private syncTimer: ReturnType<typeof setInterval> | null = null;
     private isShuttingDown: boolean = false;
 
     private static readonly HEARTBEAT_INTERVAL_MS = 10000;
@@ -57,6 +60,10 @@ export class TransportLayer {
         this.heartbeatTimer = setInterval(() => {
             this.sendHeartbeats();
         }, TransportLayer.HEARTBEAT_INTERVAL_MS);
+
+        this.syncTimer = setInterval(() => {
+            this.triggerSync();
+        }, 250);
     }
 
     /** Tutup semua koneksi dan server dengan rapi. */
@@ -68,6 +75,10 @@ export class TransportLayer {
         }
         for (const socket of this.socketsByPeer.values()) {
             socket.close();
+        }
+        if (this.syncTimer) {
+            clearInterval(this.syncTimer);
+            this.syncTimer = null;
         }
         this.socketsByPeer.clear();
         if (this.wss) {
@@ -83,35 +94,55 @@ export class TransportLayer {
      * Mengimplementasikan reconnect otomatis dengan exponential backoff.
      */
     connectToPeer(address: string): void {
+        console.log(`[transport] Connecting to ${address}...`);
+
         const socket = new WebSocket(address);
 
         socket.on('open', () => {
+            console.log(`[transport] Connected to ${address}`);
+
             this.handleConnection(socket);
             this.reconnectAttempts.set(address, 0);
         });
 
         socket.on('close', () => {
+            console.log(`[transport] Disconnected from ${address}`);
+
             if (this.isShuttingDown) return;
+
             const attempt = (this.reconnectAttempts.get(address) ?? 0) + 1;
             this.reconnectAttempts.set(address, attempt);
+
             const delay = Math.min(
                 1000 * Math.pow(2, attempt),
                 TransportLayer.MAX_BACKOFF_MS,
             );
+
+            console.log(`[transport] Reconnecting to ${address} in ${delay} ms`);
+
             setTimeout(() => this.connectToPeer(address), delay);
         });
 
-        socket.on('error', () => {
-            // event close akan tertrigger setelahnya, reconnect dijadwalkan di sana
+        socket.on('error', (err) => {
+            console.error(`[transport] Connection error to ${address}:`, err.message);
         });
     }
 
-    /** Setup listener untuk satu socket (baik sisi server maupun client). */
     private handleConnection(socket: WebSocket): void {
-        socket.on('message', (raw: Buffer) => {
-            this.handleMessage(socket, raw.toString('utf8')).catch(() => {
-                // error parsing/handling diabaikan secara aman untuk prototipe
-            });
+        socket.on('message', (raw: RawData) => {
+            try {
+                const buffer = Buffer.isBuffer(raw)
+                    ? raw
+                    : Buffer.from(raw as ArrayBuffer);
+
+                const message = decode<SyncMessage>(buffer);
+
+                this.handleMessage(socket, message).catch(() => {
+                    // error penanganan pesan diabaikan secara aman untuk prototipe
+                });
+            } catch {
+                // buffer corrupt/tidak valid, abaikan pesan ini
+            }
         });
 
         this.sendHello(socket);
@@ -120,9 +151,8 @@ export class TransportLayer {
     /** Routing pesan masuk ke method Sync Engine yang sesuai. */
     private async handleMessage(
         socket: WebSocket,
-        raw: string,
+        message: SyncMessage,
     ): Promise<void> {
-        const message = JSON.parse(raw) as SyncMessage;
 
         switch (message.type) {
             case SyncMessageType.HELLO: {
@@ -183,12 +213,20 @@ export class TransportLayer {
             knownDocuments: [],
             vectorClock: this.syncEngine.getMyVectorClock(),
         };
+
         this.send(socket, {
             type: SyncMessageType.HELLO,
             fromNodeId: this.config.nodeId,
             timestamp: Date.now(),
             payload,
         });
+    }
+
+    /** Kirim SyncMessage via socket sebagai Buffer terkompresi, hanya jika socket OPEN. */
+    private send(socket: WebSocket, message: SyncMessage): void {
+        if (socket.readyState === WebSocket.OPEN) {
+            socket.send(encode(message));
+        }
     }
 
     private sendSyncRequest(socket: WebSocket): void {
@@ -213,11 +251,11 @@ export class TransportLayer {
     }
 
     /** Kirim SyncMessage via socket, hanya jika socket sedang OPEN. */
-    private send(socket: WebSocket, message: SyncMessage): void {
-        if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify(message));
-        }
-    }
+    // private send(socket: WebSocket, message: SyncMessage): void {
+    //     if (socket.readyState === WebSocket.OPEN) {
+    //         socket.send(JSON.stringify(message));
+    //     }
+    // }
 
     /** Status koneksi setiap peer yang dikenal. Untuk Debug Inspector. */
     getPeerConnectionStatus(): PeerConnectionStatus[] {

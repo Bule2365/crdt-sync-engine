@@ -95,9 +95,7 @@ export class LSEQList {
         const lo = index > 0 ? (visible[index - 1]?.pos ?? 0) : 0;
         const hi = index < visible.length ? (visible[index]?.pos ?? 1) : 1;
         const gap = hi - lo;
-        const pos = gap > Number.EPSILON
-            ? lo + Math.random() * gap
-            : lo + Number.EPSILON;
+        const pos = lo + (gap / 2);
         return { pos, value, creatorId: this.nodeId };
     }
 
