@@ -30,7 +30,6 @@ interface RunningSystem {
     syncEngine: SyncEngine;
     transport: TransportLayer;
     debugInspector: DebugInspector;
-    syncTimer: ReturnType<typeof setInterval>;
 }
 
 /** Jalankan urutan startup lengkap sesuai dokumentasi Langkah 15, bagian 3.1. */
@@ -81,23 +80,14 @@ async function startup(config: SystemConfig): Promise<RunningSystem> {
     debugInspector.start(config.debugPort);
     console.log(`[startup] Debug Inspector listening on port ${config.debugPort}`);
 
-    // 10. Sync periodik
-    const syncTimer = setInterval(
-        () => transport.triggerSync(),
-        config.syncIntervalMs,
-    );
-
     return {
         config, log, snapshotManager, engine, syncEngine,
-        transport, debugInspector, syncTimer,
+        transport, debugInspector,
     };
 }
 
 /** Jalankan urutan shutdown lengkap, kebalikan dari startup(). */
 async function shutdown(sys: RunningSystem): Promise<void> {
-    console.log('[shutdown] Stopping sync timer...');
-    clearInterval(sys.syncTimer);
-
     console.log('[shutdown] Stopping Debug Inspector...');
     await sys.debugInspector.stop();
 

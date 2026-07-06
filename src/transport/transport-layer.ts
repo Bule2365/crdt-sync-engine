@@ -34,7 +34,7 @@ export class TransportLayer {
     private readonly socketsByPeer: Map<NodeId, WebSocket> = new Map();
     private readonly reconnectAttempts: Map<string, number> = new Map();
     private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-    private syncTimer: ReturnType<typeof setInterval> | null = null;
+    // private syncTimer: ReturnType<typeof setInterval> | null = null;
     private isShuttingDown: boolean = false;
 
     private static readonly HEARTBEAT_INTERVAL_MS = 10000;
@@ -50,7 +50,7 @@ export class TransportLayer {
         this.isShuttingDown = false;
         this.wss = new WebSocketServer({ port: this.config.websocketPort });
         this.wss.on('connection', (socket: WebSocket) => {
-            this.handleConnection(socket);
+            this.handleConnection(socket, false);
         });
 
         for (const address of this.config.peers) {
@@ -60,10 +60,6 @@ export class TransportLayer {
         this.heartbeatTimer = setInterval(() => {
             this.sendHeartbeats();
         }, TransportLayer.HEARTBEAT_INTERVAL_MS);
-
-        this.syncTimer = setInterval(() => {
-            this.triggerSync();
-        }, 250);
     }
 
     /** Tutup semua koneksi dan server dengan rapi. */
@@ -75,10 +71,6 @@ export class TransportLayer {
         }
         for (const socket of this.socketsByPeer.values()) {
             socket.close();
-        }
-        if (this.syncTimer) {
-            clearInterval(this.syncTimer);
-            this.syncTimer = null;
         }
         this.socketsByPeer.clear();
         if (this.wss) {
@@ -101,7 +93,7 @@ export class TransportLayer {
         socket.on('open', () => {
             console.log(`[transport] Connected to ${address}`);
 
-            this.handleConnection(socket);
+            this.handleConnection(socket, true);
             this.reconnectAttempts.set(address, 0);
         });
 
@@ -128,7 +120,10 @@ export class TransportLayer {
         });
     }
 
-    private handleConnection(socket: WebSocket): void {
+    private handleConnection(
+        socket: WebSocket,
+        initiateHello: boolean,
+    ): void {
         socket.on('message', (raw: RawData) => {
             try {
                 const buffer = Buffer.isBuffer(raw)
@@ -144,8 +139,9 @@ export class TransportLayer {
                 // buffer corrupt/tidak valid, abaikan pesan ini
             }
         });
-
-        this.sendHello(socket);
+        if (initiateHello) {
+            this.sendHello(socket);
+        }
     }
 
     /** Routing pesan masuk ke method Sync Engine yang sesuai. */
@@ -157,18 +153,29 @@ export class TransportLayer {
         switch (message.type) {
             case SyncMessageType.HELLO: {
                 const payload = message.payload as HelloPayload;
+
+                console.log(`[transport] Received HELLO from ${payload.nodeId}`);
+
+                if (this.socketsByPeer.has(payload.nodeId)) {
+                    socket.close();
+                    return;
+                }
+
                 this.syncEngine.registerPeer(payload.nodeId);
                 this.syncEngine.updatePeerClock(payload.nodeId, payload.vectorClock);
                 this.socketsByPeer.set(payload.nodeId, socket);
+
                 this.sendSyncRequest(socket);
                 break;
             }
             case SyncMessageType.SYNC_REQ: {
+                console.log(`[transport] Received SYNC_REQ from ${message.fromNodeId}`);
                 const reqPayload = message.payload as { vectorClock: VectorClockRecord };
                 const delta = await this.syncEngine.computeDelta(
                     message.fromNodeId,
                     reqPayload.vectorClock,
                 );
+                console.log(`[transport] Sent SYNC_DELTA to ${message.fromNodeId}`);
                 this.send(socket, {
                     type: SyncMessageType.SYNC_DELTA,
                     fromNodeId: this.config.nodeId,
@@ -180,6 +187,10 @@ export class TransportLayer {
             case SyncMessageType.SYNC_DELTA: {
                 const delta = message.payload as DeltaPayload;
                 await this.syncEngine.receiveDelta(delta);
+                console.log(
+                    `[transport] Received SYNC_DELTA from ${message.fromNodeId}`
+                );
+                console.log(`[transport] Sending SYNC_ACK`);
                 this.send(socket, {
                     type: SyncMessageType.SYNC_ACK,
                     fromNodeId: this.config.nodeId,
@@ -189,11 +200,13 @@ export class TransportLayer {
                 break;
             }
             case SyncMessageType.SYNC_ACK: {
+                console.log(`[transport] Received SYNC_ACK from ${message.fromNodeId}`);
                 const ackPayload = message.payload as { vectorClock: VectorClockRecord };
                 this.syncEngine.updatePeerClock(message.fromNodeId, ackPayload.vectorClock);
                 break;
             }
             case SyncMessageType.HEARTBEAT:
+                console.log(`[transport] Received HEARTBEAT from ${message.fromNodeId}`);
                 break;
         }
     }
@@ -214,6 +227,8 @@ export class TransportLayer {
             vectorClock: this.syncEngine.getMyVectorClock(),
         };
 
+        console.log(`[transport] Sent HELLO`);
+
         this.send(socket, {
             type: SyncMessageType.HELLO,
             fromNodeId: this.config.nodeId,
@@ -230,6 +245,7 @@ export class TransportLayer {
     }
 
     private sendSyncRequest(socket: WebSocket): void {
+        console.log(`[transport] Sent SYNC_REQ`);
         this.send(socket, {
             type: SyncMessageType.SYNC_REQ,
             fromNodeId: this.config.nodeId,
@@ -241,6 +257,7 @@ export class TransportLayer {
     private sendHeartbeats(): void {
         for (const socket of this.socketsByPeer.values()) {
             if (socket.readyState === WebSocket.OPEN) {
+                console.log(`[transport] Sent HEARTBEAT`);
                 this.send(socket, {
                     type: SyncMessageType.HEARTBEAT,
                     fromNodeId: this.config.nodeId,
